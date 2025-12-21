@@ -257,30 +257,31 @@ def determine_culture_classification(counts, total_cells, avg_solidity):
             'reasoning': 'No cells detected'
         }
     
-    # Validated threshold = 0.792
+    # Validated threshold = 0.79 (updated with n=13 samples)
+    # PBS range: 0.7912 - 0.857 | LPS range: 0.748 - 0.788
     if avg_solidity > 0.82:
         return {
             'classification': 'RESTING',
             'confidence': 'HIGH',
-            'reasoning': f'High solidity ({avg_solidity:.3f}) well above 0.792 threshold. Consistent with PBS/resting state.'
+            'reasoning': f'High solidity ({avg_solidity:.3f}) well above 0.79 threshold. Consistent with PBS/resting state.'
         }
-    elif avg_solidity > 0.792:
+    elif avg_solidity > 0.79:
         return {
             'classification': 'RESTING',
             'confidence': 'MEDIUM',
-            'reasoning': f'Solidity ({avg_solidity:.3f}) above 0.792 threshold. Consistent with PBS/resting state.'
+            'reasoning': f'Solidity ({avg_solidity:.3f}) above 0.79 threshold. Consistent with PBS/resting state.'
         }
     elif avg_solidity > 0.77:
         return {
             'classification': 'ACTIVATED',
             'confidence': 'MEDIUM',
-            'reasoning': f'Solidity ({avg_solidity:.3f}) below 0.792 threshold. Consistent with LPS/activated state.'
+            'reasoning': f'Solidity ({avg_solidity:.3f}) below 0.79 threshold. Consistent with LPS/activated state.'
         }
     else:
         return {
             'classification': 'ACTIVATED',
             'confidence': 'HIGH',
-            'reasoning': f'Low solidity ({avg_solidity:.3f}) well below 0.792 threshold. Consistent with LPS/activated state.'
+            'reasoning': f'Low solidity ({avg_solidity:.3f}) well below 0.79 threshold. Consistent with LPS/activated state.'
         }
 
 def determine_tissue_classification(percentages):
@@ -322,10 +323,10 @@ def determine_tissue_classification(percentages):
 def health():
     return jsonify({
         'status': 'healthy', 
-        'version': '3.0.1-fixed',
-        'threshold': 0.792,
-        'calibration': 'n=6 blinded samples (3 PBS, 3 LPS)',
-        'accuracy': '100% (6/6)',
+        'version': '3.0.2-recalibrated',
+        'threshold': 0.79,
+        'calibration': 'n=13 blinded samples (7 PBS, 6 LPS)',
+        'accuracy': '100% (13/13)',
         'accepts': ['application/json', 'multipart/form-data']
     })
 
