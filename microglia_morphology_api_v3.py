@@ -1,11 +1,7 @@
 """
-Microglia Morphology Analysis API v2
+Microglia Morphology Analysis API v3.0.1
 With PRIMARY CULTURE mode for in vitro analysis
-
-Key difference from tissue section analysis:
-- In tissue: Activated = round/amoeboid (high circularity, high solidity)
-- In culture: Activated = irregular with processes (LOW solidity, variable circularity)
-- In culture: Resting = compact spindle/bipolar (HIGH solidity)
+FIXED: Now accepts both JSON and multipart/form-data file uploads
 
 Requirements:
 pip install flask numpy scikit-image scipy pillow gunicorn
@@ -39,6 +35,11 @@ def load_image_from_url(url):
     with urllib.request.urlopen(url) as response:
         image_data = response.read()
     image = Image.open(io.BytesIO(image_data))
+    return np.array(image)
+
+def load_image_from_file(file_storage):
+    """Load image from uploaded file"""
+    image = Image.open(file_storage)
     return np.array(image)
 
 def preprocess_image(img):
@@ -138,37 +139,24 @@ def classify_morphology_tissue(metrics):
 
 def classify_morphology_culture(metrics):
     """
-    PRIMARY CULTURE classification (new)
-    Based on empirical data from PBS vs LPS comparison:
-    - PBS (resting): HIGH solidity (0.857), compact spindle shape
-    - LPS (activated): LOW solidity (0.759), irregular with processes
-    
-    Thresholds calibrated from your data:
-    - Solidity > 0.82 = resting (compact)
-    - Solidity < 0.75 = activated (irregular)
-    - Between = reactive/transitional
+    PRIMARY CULTURE classification
+    Based on empirical data from PBS vs LPS comparison
     """
     circularity = metrics.get('circularity', 0)
     solidity = metrics.get('solidity', 0)
     aspect_ratio = metrics.get('aspect_ratio', 1)
     
-    # Primary discriminator: SOLIDITY
-    # Secondary: circularity and aspect ratio
-    
     if solidity > 0.82:
-        # High solidity = compact = resting in culture
         if aspect_ratio > 2.5:
-            return 'resting_spindle'  # Elongated but compact
+            return 'resting_spindle'
         else:
-            return 'resting_round'    # Round and compact
+            return 'resting_round'
     elif solidity < 0.72:
-        # Low solidity = irregular = activated in culture
         if circularity < 0.4:
-            return 'activated_branched'  # Many processes
+            return 'activated_branched'
         else:
-            return 'activated_amoeboid'  # Irregular but roundish
+            return 'activated_amoeboid'
     else:
-        # Transitional
         if circularity > 0.6:
             return 'transitional_compact'
         else:
@@ -176,49 +164,27 @@ def classify_morphology_culture(metrics):
 
 def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size=50000, 
                   mode='culture'):
-    """
-    Full morphology analysis pipeline
+    """Full morphology analysis pipeline"""
     
-    Args:
-        mode: 'culture' for primary culture, 'tissue' for tissue sections
-    """
-    
-    # 1. Preprocess
     gray = preprocess_image(img)
-    
-    # 2. Threshold
     binary = threshold_image(gray, method=threshold_method)
-    
-    # 3. Clean up
     binary = remove_small_objects(binary, min_size=min_cell_size)
     binary = ndimage.binary_fill_holes(binary)
-    
-    # 4. Label connected components
     labeled = measure.label(binary)
     
-    # 5. Choose classification function based on mode
     if mode == 'culture':
         classify_func = classify_morphology_culture
-        # Culture-specific categories
         morphology_counts = {
-            'resting_spindle': 0,
-            'resting_round': 0,
-            'activated_branched': 0,
-            'activated_amoeboid': 0,
-            'transitional_compact': 0,
-            'transitional_irregular': 0
+            'resting_spindle': 0, 'resting_round': 0,
+            'activated_branched': 0, 'activated_amoeboid': 0,
+            'transitional_compact': 0, 'transitional_irregular': 0
         }
     else:
         classify_func = classify_morphology_tissue
-        # Tissue section categories
         morphology_counts = {
-            'amoeboid': 0,
-            'reactive': 0,
-            'ramified': 0,
-            'intermediate': 0
+            'amoeboid': 0, 'reactive': 0, 'ramified': 0, 'intermediate': 0
         }
     
-    # 6. Analyze each cell
     cells = []
     
     for region in measure.regionprops(labeled):
@@ -231,7 +197,6 @@ def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size
         if cell_metrics:
             cell_metrics['label'] = region.label
             cell_metrics['centroid'] = list(region.centroid)
-            
             morphology_type = classify_func(cell_metrics)
             cell_metrics['morphology_type'] = morphology_type
             
@@ -240,10 +205,7 @@ def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size
             
             cells.append(cell_metrics)
     
-    # 7. Skeleton analysis
     skeleton_results = analyze_skeleton(binary)
-    
-    # 8. Calculate summary statistics
     total_cells = len(cells)
     
     if total_cells > 0:
@@ -257,12 +219,10 @@ def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size
         avg_circularity = avg_solidity = avg_area = avg_perimeter = 0
         avg_area_perimeter = avg_aspect_ratio = 0
     
-    # 9. Calculate percentages
     morphology_percentages = {}
     for morph_type, count in morphology_counts.items():
         morphology_percentages[f'{morph_type}_percent'] = round(100 * count / total_cells, 1) if total_cells > 0 else 0
     
-    # 10. Determine overall classification
     if mode == 'culture':
         classification = determine_culture_classification(morphology_counts, total_cells, avg_solidity)
     else:
@@ -289,10 +249,7 @@ def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size
     }
 
 def determine_culture_classification(counts, total_cells, avg_solidity):
-    """
-    Determine overall classification for PRIMARY CULTURE
-    Based on solidity as primary discriminator
-    """
+    """Determine overall classification for PRIMARY CULTURE"""
     if total_cells == 0:
         return {
             'classification': 'INSUFFICIENT_CELLS',
@@ -300,16 +257,7 @@ def determine_culture_classification(counts, total_cells, avg_solidity):
             'reasoning': 'No cells detected'
         }
     
-    # Count resting vs activated
-    resting_count = counts.get('resting_spindle', 0) + counts.get('resting_round', 0)
-    activated_count = counts.get('activated_branched', 0) + counts.get('activated_amoeboid', 0)
-    transitional_count = counts.get('transitional_compact', 0) + counts.get('transitional_irregular', 0)
-    
-    resting_pct = 100 * resting_count / total_cells
-    activated_pct = 100 * activated_count / total_cells
-    
-    # Primary decision based on avg_solidity (validated threshold = 0.792)
-    # Calibrated on n=6 samples: PBS range 0.797-0.857, LPS range 0.759-0.788
+    # Validated threshold = 0.792
     if avg_solidity > 0.82:
         return {
             'classification': 'RESTING',
@@ -374,34 +322,68 @@ def determine_tissue_classification(percentages):
 def health():
     return jsonify({
         'status': 'healthy', 
-        'version': '3.0.0-validated',
+        'version': '3.0.1-fixed',
         'threshold': 0.792,
         'calibration': 'n=6 blinded samples (3 PBS, 3 LPS)',
-        'accuracy': '100% (6/6)'
+        'accuracy': '100% (6/6)',
+        'accepts': ['application/json', 'multipart/form-data']
     })
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
     """
     Main analysis endpoint
+    Accepts BOTH JSON and multipart/form-data
     
-    New parameter:
-    - mode: 'culture' (default) or 'tissue'
+    JSON format:
+    {"base64": "...", "mode": "culture"}
+    or {"url": "...", "mode": "culture"}
+    
+    Form-data format:
+    image: <file>
+    mode: culture (optional)
     """
     try:
-        data = request.json
+        img = None
+        mode = 'culture'
+        threshold_method = 'local'
+        min_cell_size = 50
+        max_cell_size = 50000
         
-        if 'base64' in data:
-            img = load_image_from_base64(data['base64'])
-        elif 'url' in data:
-            img = load_image_from_url(data['url'])
-        else:
-            return jsonify({'error': 'No image provided'}), 400
+        # Check if it's a file upload (multipart/form-data)
+        if request.files and 'image' in request.files:
+            file = request.files['image']
+            img = load_image_from_file(file)
+            mode = request.form.get('mode', 'culture')
+            threshold_method = request.form.get('threshold_method', 'local')
+            min_cell_size = int(request.form.get('min_cell_size', 50))
+            max_cell_size = int(request.form.get('max_cell_size', 50000))
         
-        threshold_method = data.get('threshold_method', 'local')
-        min_cell_size = data.get('min_cell_size', 50)
-        max_cell_size = data.get('max_cell_size', 50000)
-        mode = data.get('mode', 'culture')  # NEW: culture or tissue
+        # Check if it's JSON
+        elif request.is_json:
+            data = request.get_json()
+            if 'base64' in data:
+                img = load_image_from_base64(data['base64'])
+            elif 'url' in data:
+                img = load_image_from_url(data['url'])
+            mode = data.get('mode', 'culture')
+            threshold_method = data.get('threshold_method', 'local')
+            min_cell_size = data.get('min_cell_size', 50)
+            max_cell_size = data.get('max_cell_size', 50000)
+        
+        # Fallback: try to get any uploaded file
+        elif request.files:
+            for key in request.files:
+                file = request.files[key]
+                img = load_image_from_file(file)
+                break
+            mode = request.form.get('mode', 'culture')
+        
+        if img is None:
+            return jsonify({
+                'error': 'No image provided',
+                'hint': 'Send image as file upload (form-data with "image" field) or JSON with "base64" or "url" key'
+            }), 400
         
         results = analyze_image(
             img, 
@@ -420,16 +402,30 @@ def analyze():
 def analyze_quick():
     """Quick analysis - summary only"""
     try:
-        data = request.json
+        img = None
+        mode = 'culture'
         
-        if 'base64' in data:
-            img = load_image_from_base64(data['base64'])
-        elif 'url' in data:
-            img = load_image_from_url(data['url'])
-        else:
+        if request.files and 'image' in request.files:
+            file = request.files['image']
+            img = load_image_from_file(file)
+            mode = request.form.get('mode', 'culture')
+        elif request.is_json:
+            data = request.get_json()
+            if 'base64' in data:
+                img = load_image_from_base64(data['base64'])
+            elif 'url' in data:
+                img = load_image_from_url(data['url'])
+            mode = data.get('mode', 'culture')
+        elif request.files:
+            for key in request.files:
+                file = request.files[key]
+                img = load_image_from_file(file)
+                break
+            mode = request.form.get('mode', 'culture')
+        
+        if img is None:
             return jsonify({'error': 'No image provided'}), 400
         
-        mode = data.get('mode', 'culture')
         results = analyze_image(img, mode=mode)
         
         return jsonify({
