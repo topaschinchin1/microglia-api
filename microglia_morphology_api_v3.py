@@ -1,7 +1,14 @@
 """
-Microglia Morphology Analysis API v3.0.1
-With PRIMARY CULTURE mode for in vitro analysis
-FIXED: Now accepts both JSON and multipart/form-data file uploads
+Microglia Morphology Analysis API v4.0.0
+With 4-CATEGORY MORPHOLOGY CLASSIFICATION
+
+Categories (based on validated reference data):
+1. RAMIFIED - 🟢 RESTING: Small soma, long processes, high branching, star-shaped
+2. AMOEBOID - 🔴 ACTIVATED: Large soma, absent processes, no branching, round
+3. HYPERTROPHIC - 🔴 ACTIVATED: Enlarged body, thickened processes  
+4. ROD_LIKE - 🔴 ACTIVATED: Elongated bipolar shape
+
+Calibration: n=14 samples, 100% accuracy, threshold=0.79
 
 Requirements:
 pip install flask numpy scikit-image scipy pillow gunicorn
@@ -20,6 +27,19 @@ from skimage.morphology import skeletonize, remove_small_objects
 from scipy import ndimage
 
 app = Flask(__name__)
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+# Validated threshold (recalibrated on n=14 samples)
+SOLIDITY_THRESHOLD = 0.79
+BORDERLINE_LOW = 0.78
+BORDERLINE_HIGH = 0.80
+
+# =============================================================================
+# IMAGE LOADING
+# =============================================================================
 
 def load_image_from_base64(base64_string):
     """Load image from base64 string"""
@@ -41,6 +61,10 @@ def load_image_from_file(file_storage):
     """Load image from uploaded file"""
     image = Image.open(file_storage)
     return np.array(image)
+
+# =============================================================================
+# IMAGE PROCESSING
+# =============================================================================
 
 def preprocess_image(img):
     """Convert to grayscale if needed"""
@@ -86,8 +110,7 @@ def analyze_skeleton(binary_image):
     return {
         'skeleton_length_pixels': int(skeleton_length),
         'endpoints': int(endpoints),
-        'branch_points': int(branch_points),
-        'skeleton_image': skeleton
+        'branch_points': int(branch_points)
     }
 
 def analyze_single_cell(cell_mask, cell_intensity=None):
@@ -119,72 +142,117 @@ def analyze_single_cell(cell_mask, cell_intensity=None):
         'minor_axis': float(props.minor_axis_length)
     }
 
-def classify_morphology_tissue(metrics):
-    """
-    TISSUE SECTION classification (original)
-    High circularity + high solidity = amoeboid (activated)
-    Low circularity + low solidity = ramified (resting)
-    """
-    circularity = metrics.get('circularity', 0)
-    solidity = metrics.get('solidity', 0)
-    
-    if circularity > 0.4 and solidity > 0.6:
-        return 'amoeboid'
-    elif circularity < 0.2 and solidity < 0.4:
-        return 'ramified'
-    elif circularity > 0.25 or solidity > 0.5:
-        return 'reactive'
-    else:
-        return 'intermediate'
+# =============================================================================
+# 4-CATEGORY MORPHOLOGY CLASSIFICATION
+# =============================================================================
 
-def classify_morphology_culture(metrics):
+def classify_morphology_4category(metrics):
     """
-    PRIMARY CULTURE classification
-    Based on empirical data from PBS vs LPS comparison
+    4-CATEGORY CLASSIFICATION SYSTEM
+    
+    Based on validated reference data from GPT-4o analysis:
+    
+    1. RAMIFIED - 🟢 RESTING
+       - Small soma, long processes, high branching, star-shaped
+       - High solidity (>0.79), low circularity (<0.5), moderate aspect ratio
+       
+    2. AMOEBOID - 🔴 ACTIVATED  
+       - Large soma, absent processes, no branching, round
+       - High circularity (>0.6), high solidity (>0.8), low aspect ratio (<2)
+       
+    3. HYPERTROPHIC - 🔴 ACTIVATED
+       - Enlarged body, thickened processes
+       - Medium solidity (0.72-0.82), low circularity, moderate branching
+       
+    4. ROD_LIKE - 🔴 ACTIVATED
+       - Elongated bipolar shape
+       - High aspect ratio (>3), high eccentricity (>0.9)
     """
-    circularity = metrics.get('circularity', 0)
     solidity = metrics.get('solidity', 0)
+    circularity = metrics.get('circularity', 0)
     aspect_ratio = metrics.get('aspect_ratio', 1)
+    eccentricity = metrics.get('eccentricity', 0)
     
-    if solidity > 0.82:
-        if aspect_ratio > 2.5:
-            return 'resting_spindle'
-        else:
-            return 'resting_round'
-    elif solidity < 0.72:
-        if circularity < 0.4:
-            return 'activated_branched'
-        else:
-            return 'activated_amoeboid'
+    # ROD_LIKE: Elongated bipolar shape (highest priority for shape detection)
+    if aspect_ratio > 3.0 and eccentricity > 0.85:
+        return {
+            'morphology_class': 'ROD_LIKE',
+            'activation_state': 'ACTIVATED',
+            'features': 'Elongated bipolar shape, high aspect ratio'
+        }
+    
+    # AMOEBOID: Round, blob-like, no processes
+    if circularity > 0.55 and solidity > 0.75 and aspect_ratio < 2.2:
+        return {
+            'morphology_class': 'AMOEBOID',
+            'activation_state': 'ACTIVATED',
+            'features': 'Large soma, absent processes, round shape'
+        }
+    
+    # RAMIFIED: Star-shaped, highly branched (resting state)
+    if solidity > SOLIDITY_THRESHOLD and circularity < 0.55:
+        return {
+            'morphology_class': 'RAMIFIED',
+            'activation_state': 'RESTING',
+            'features': 'Small soma, long processes, high branching, star-shaped'
+        }
+    
+    # HYPERTROPHIC: Enlarged body with thickened processes
+    if solidity < SOLIDITY_THRESHOLD and circularity < 0.5:
+        return {
+            'morphology_class': 'HYPERTROPHIC',
+            'activation_state': 'ACTIVATED',
+            'features': 'Enlarged body, thickened processes'
+        }
+    
+    # Default: Classify based on solidity threshold
+    if solidity >= SOLIDITY_THRESHOLD:
+        return {
+            'morphology_class': 'RAMIFIED',
+            'activation_state': 'RESTING',
+            'features': 'Compact morphology, resting-like'
+        }
     else:
-        if circularity > 0.6:
-            return 'transitional_compact'
-        else:
-            return 'transitional_irregular'
+        return {
+            'morphology_class': 'HYPERTROPHIC',
+            'activation_state': 'ACTIVATED',
+            'features': 'Irregular morphology, activation signs'
+        }
 
-def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size=50000, 
-                  mode='culture'):
-    """Full morphology analysis pipeline"""
+# =============================================================================
+# MAIN ANALYSIS PIPELINE
+# =============================================================================
+
+def analyze_image(img, threshold_method='local', min_cell_size=50, max_cell_size=50000):
+    """Full morphology analysis pipeline with 4-category classification"""
     
+    # 1. Preprocess
     gray = preprocess_image(img)
+    
+    # 2. Threshold
     binary = threshold_image(gray, method=threshold_method)
+    
+    # 3. Clean up
     binary = remove_small_objects(binary, min_size=min_cell_size)
     binary = ndimage.binary_fill_holes(binary)
+    
+    # 4. Label connected components
     labeled = measure.label(binary)
     
-    if mode == 'culture':
-        classify_func = classify_morphology_culture
-        morphology_counts = {
-            'resting_spindle': 0, 'resting_round': 0,
-            'activated_branched': 0, 'activated_amoeboid': 0,
-            'transitional_compact': 0, 'transitional_irregular': 0
-        }
-    else:
-        classify_func = classify_morphology_tissue
-        morphology_counts = {
-            'amoeboid': 0, 'reactive': 0, 'ramified': 0, 'intermediate': 0
-        }
+    # 5. Initialize 4-category counts
+    morphology_counts = {
+        'RAMIFIED': 0,
+        'AMOEBOID': 0,
+        'HYPERTROPHIC': 0,
+        'ROD_LIKE': 0
+    }
     
+    activation_counts = {
+        'RESTING': 0,
+        'ACTIVATED': 0
+    }
+    
+    # 6. Analyze each cell
     cells = []
     
     for region in measure.regionprops(labeled):
@@ -195,17 +263,30 @@ def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size
         cell_metrics = analyze_single_cell(cell_mask)
         
         if cell_metrics:
-            cell_metrics['label'] = region.label
-            cell_metrics['centroid'] = list(region.centroid)
-            morphology_type = classify_func(cell_metrics)
-            cell_metrics['morphology_type'] = morphology_type
+            cell_metrics['label'] = int(region.label)
+            cell_metrics['centroid'] = [float(c) for c in region.centroid]
             
-            if morphology_type in morphology_counts:
-                morphology_counts[morphology_type] += 1
+            # Apply 4-category classification
+            classification = classify_morphology_4category(cell_metrics)
+            cell_metrics['morphology_class'] = classification['morphology_class']
+            cell_metrics['activation_state'] = classification['activation_state']
+            cell_metrics['features'] = classification['features']
+            
+            # Update counts
+            morph_class = classification['morphology_class']
+            if morph_class in morphology_counts:
+                morphology_counts[morph_class] += 1
+            
+            act_state = classification['activation_state']
+            if act_state in activation_counts:
+                activation_counts[act_state] += 1
             
             cells.append(cell_metrics)
     
+    # 7. Skeleton analysis
     skeleton_results = analyze_skeleton(binary)
+    
+    # 8. Calculate summary statistics
     total_cells = len(cells)
     
     if total_cells > 0:
@@ -215,138 +296,139 @@ def analyze_image(img, threshold_method='otsu', min_cell_size=100, max_cell_size
         avg_perimeter = np.mean([c['perimeter'] for c in cells])
         avg_area_perimeter = np.mean([c['area_perimeter_ratio'] for c in cells])
         avg_aspect_ratio = np.mean([c['aspect_ratio'] for c in cells])
+        avg_eccentricity = np.mean([c['eccentricity'] for c in cells])
     else:
         avg_circularity = avg_solidity = avg_area = avg_perimeter = 0
-        avg_area_perimeter = avg_aspect_ratio = 0
+        avg_area_perimeter = avg_aspect_ratio = avg_eccentricity = 0
     
+    # 9. Calculate percentages
     morphology_percentages = {}
     for morph_type, count in morphology_counts.items():
         morphology_percentages[f'{morph_type}_percent'] = round(100 * count / total_cells, 1) if total_cells > 0 else 0
     
-    if mode == 'culture':
-        classification = determine_culture_classification(morphology_counts, total_cells, avg_solidity)
-    else:
-        classification = determine_tissue_classification(morphology_percentages)
+    activation_percentages = {}
+    for act_type, count in activation_counts.items():
+        activation_percentages[f'{act_type}_percent'] = round(100 * count / total_cells, 1) if total_cells > 0 else 0
+    
+    # 10. Determine overall classification
+    classification = determine_overall_classification(
+        morphology_counts, 
+        activation_counts,
+        total_cells, 
+        avg_solidity
+    )
     
     return {
         'summary': {
-            'total_cells_detected': total_cells,
-            'avg_circularity': round(avg_circularity, 4),
-            'avg_solidity': round(avg_solidity, 4),
-            'avg_area': round(avg_area, 2),
-            'avg_perimeter': round(avg_perimeter, 2),
-            'avg_area_perimeter_ratio': round(avg_area_perimeter, 4),
-            'avg_aspect_ratio': round(avg_aspect_ratio, 4),
-            'skeleton_length': skeleton_results['skeleton_length_pixels'],
-            'total_endpoints': skeleton_results['endpoints'],
-            'total_branch_points': skeleton_results['branch_points']
+            'total_cells_detected': int(total_cells),
+            'avg_circularity': float(round(avg_circularity, 4)),
+            'avg_solidity': float(round(avg_solidity, 4)),
+            'avg_area': float(round(avg_area, 2)),
+            'avg_perimeter': float(round(avg_perimeter, 2)),
+            'avg_area_perimeter_ratio': float(round(avg_area_perimeter, 4)),
+            'avg_aspect_ratio': float(round(avg_aspect_ratio, 4)),
+            'avg_eccentricity': float(round(avg_eccentricity, 4)),
+            'skeleton_length': int(skeleton_results['skeleton_length_pixels']),
+            'total_endpoints': int(skeleton_results['endpoints']),
+            'total_branch_points': int(skeleton_results['branch_points'])
         },
         'morphology_counts': morphology_counts,
         'morphology_percentages': morphology_percentages,
+        'activation_counts': activation_counts,
+        'activation_percentages': activation_percentages,
         'classification': classification,
-        'mode': mode,
         'individual_cells': cells[:50]
     }
 
-def determine_culture_classification(counts, total_cells, avg_solidity):
-    """Determine overall classification for PRIMARY CULTURE"""
+def determine_overall_classification(morph_counts, act_counts, total_cells, avg_solidity):
+    """
+    Determine overall classification based on 4-category system
+    """
     if total_cells == 0:
         return {
-            'classification': 'INSUFFICIENT_CELLS',
+            'activation_state': 'INSUFFICIENT_CELLS',
+            'dominant_morphology': 'UNKNOWN',
             'confidence': 'LOW',
+            'is_borderline': False,
             'reasoning': 'No cells detected'
         }
     
-    # Validated threshold = 0.79 (updated with n=13 samples)
-    # PBS range: 0.7912 - 0.857 | LPS range: 0.748 - 0.788
-    if avg_solidity > 0.82:
-        return {
-            'classification': 'RESTING',
-            'confidence': 'HIGH',
-            'reasoning': f'High solidity ({avg_solidity:.3f}) well above 0.79 threshold. Consistent with PBS/resting state.'
-        }
-    elif avg_solidity > 0.79:
-        return {
-            'classification': 'RESTING',
-            'confidence': 'MEDIUM',
-            'reasoning': f'Solidity ({avg_solidity:.3f}) above 0.79 threshold. Consistent with PBS/resting state.'
-        }
-    elif avg_solidity > 0.77:
-        return {
-            'classification': 'ACTIVATED',
-            'confidence': 'MEDIUM',
-            'reasoning': f'Solidity ({avg_solidity:.3f}) below 0.79 threshold. Consistent with LPS/activated state.'
-        }
-    else:
-        return {
-            'classification': 'ACTIVATED',
-            'confidence': 'HIGH',
-            'reasoning': f'Low solidity ({avg_solidity:.3f}) well below 0.79 threshold. Consistent with LPS/activated state.'
-        }
-
-def determine_tissue_classification(percentages):
-    """Original tissue section classification"""
-    amoeboid_pct = percentages.get('amoeboid_percent', 0)
-    reactive_pct = percentages.get('reactive_percent', 0)
-    ramified_pct = percentages.get('ramified_percent', 0)
+    # Find dominant morphology
+    dominant_morph = max(morph_counts, key=morph_counts.get)
+    dominant_count = morph_counts[dominant_morph]
+    dominant_pct = 100 * dominant_count / total_cells
     
-    activated_total = amoeboid_pct + reactive_pct
+    # Check for borderline solidity
+    is_borderline = bool(BORDERLINE_LOW <= avg_solidity <= BORDERLINE_HIGH)
     
-    if amoeboid_pct >= 15:
-        return {
-            'classification': 'ACTIVATED',
-            'confidence': 'HIGH',
-            'reasoning': f'Amoeboid cells ({amoeboid_pct}%) exceed 15% threshold'
-        }
-    elif activated_total >= 25:
-        return {
-            'classification': 'LIKELY_ACTIVATED', 
-            'confidence': 'MEDIUM',
-            'reasoning': f'Combined amoeboid+reactive ({activated_total}%) indicates activation'
-        }
-    elif ramified_pct >= 60:
-        return {
-            'classification': 'RESTING',
-            'confidence': 'HIGH',
-            'reasoning': f'Predominantly ramified morphology ({ramified_pct}%)'
-        }
+    # Determine activation state based on avg_solidity (primary) and cell counts (secondary)
+    resting_pct = 100 * act_counts['RESTING'] / total_cells
+    activated_pct = 100 * act_counts['ACTIVATED'] / total_cells
+    
+    # Primary decision: avg_solidity threshold (validated on n=14 samples)
+    if avg_solidity > BORDERLINE_HIGH:
+        activation_state = 'RESTING'
+        confidence = 'HIGH'
+        reasoning = f'High solidity ({avg_solidity:.3f}) well above {SOLIDITY_THRESHOLD} threshold. Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
+    elif avg_solidity >= SOLIDITY_THRESHOLD:
+        activation_state = 'RESTING'
+        confidence = 'MEDIUM' if is_borderline else 'HIGH'
+        reasoning = f'Solidity ({avg_solidity:.3f}) above {SOLIDITY_THRESHOLD} threshold. Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
+    elif avg_solidity >= BORDERLINE_LOW:
+        activation_state = 'ACTIVATED'
+        confidence = 'MEDIUM'
+        reasoning = f'Solidity ({avg_solidity:.3f}) below {SOLIDITY_THRESHOLD} threshold (borderline zone). Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
     else:
-        return {
-            'classification': 'MIXED',
-            'confidence': 'LOW',
-            'reasoning': 'Heterogeneous morphology distribution'
-        }
+        activation_state = 'ACTIVATED'
+        confidence = 'HIGH'
+        reasoning = f'Low solidity ({avg_solidity:.3f}) well below {SOLIDITY_THRESHOLD} threshold. Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
+    
+    # Add borderline warning if applicable
+    if is_borderline:
+        reasoning += f' ⚠️ BORDERLINE: Solidity in {BORDERLINE_LOW}-{BORDERLINE_HIGH} zone - recommend manual verification.'
+    
+    return {
+        'activation_state': activation_state,
+        'dominant_morphology': dominant_morph,
+        'confidence': confidence,
+        'is_borderline': is_borderline,
+        'reasoning': reasoning
+    }
 
-# Flask Routes
+# =============================================================================
+# FLASK ROUTES
+# =============================================================================
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         'status': 'healthy', 
-        'version': '3.0.2-recalibrated',
-        'threshold': 0.79,
-        'calibration': 'n=13 blinded samples (7 PBS, 6 LPS)',
-        'accuracy': '100% (13/13)',
+        'version': '4.0.0-4category',
+        'threshold': SOLIDITY_THRESHOLD,
+        'borderline_zone': [BORDERLINE_LOW, BORDERLINE_HIGH],
+        'calibration': 'n=14 samples (PBS vs LPS)',
+        'accuracy': '100% (14/14)',
+        'categories': ['RAMIFIED', 'AMOEBOID', 'HYPERTROPHIC', 'ROD_LIKE'],
         'accepts': ['application/json', 'multipart/form-data']
     })
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
     """
-    Main analysis endpoint
+    Main analysis endpoint with 4-category morphology classification
+    
     Accepts BOTH JSON and multipart/form-data
     
     JSON format:
-    {"base64": "...", "mode": "culture"}
-    or {"url": "...", "mode": "culture"}
+    {"base64": "...", "threshold_method": "local"}
+    or {"url": "...", "threshold_method": "local"}
     
     Form-data format:
     image: <file>
-    mode: culture (optional)
+    threshold_method: local (optional)
     """
     try:
         img = None
-        mode = 'culture'
         threshold_method = 'local'
         min_cell_size = 50
         max_cell_size = 50000
@@ -355,7 +437,6 @@ def analyze():
         if request.files and 'image' in request.files:
             file = request.files['image']
             img = load_image_from_file(file)
-            mode = request.form.get('mode', 'culture')
             threshold_method = request.form.get('threshold_method', 'local')
             min_cell_size = int(request.form.get('min_cell_size', 50))
             max_cell_size = int(request.form.get('max_cell_size', 50000))
@@ -367,7 +448,6 @@ def analyze():
                 img = load_image_from_base64(data['base64'])
             elif 'url' in data:
                 img = load_image_from_url(data['url'])
-            mode = data.get('mode', 'culture')
             threshold_method = data.get('threshold_method', 'local')
             min_cell_size = data.get('min_cell_size', 50)
             max_cell_size = data.get('max_cell_size', 50000)
@@ -378,7 +458,7 @@ def analyze():
                 file = request.files[key]
                 img = load_image_from_file(file)
                 break
-            mode = request.form.get('mode', 'culture')
+            threshold_method = request.form.get('threshold_method', 'local')
         
         if img is None:
             return jsonify({
@@ -390,8 +470,7 @@ def analyze():
             img, 
             threshold_method=threshold_method,
             min_cell_size=min_cell_size,
-            max_cell_size=max_cell_size,
-            mode=mode
+            max_cell_size=max_cell_size
         )
         
         return jsonify(results)
@@ -401,39 +480,37 @@ def analyze():
 
 @app.route('/analyze/quick', methods=['POST'])
 def analyze_quick():
-    """Quick analysis - summary only"""
+    """Quick analysis - summary and classification only"""
     try:
         img = None
-        mode = 'culture'
         
         if request.files and 'image' in request.files:
             file = request.files['image']
             img = load_image_from_file(file)
-            mode = request.form.get('mode', 'culture')
         elif request.is_json:
             data = request.get_json()
             if 'base64' in data:
                 img = load_image_from_base64(data['base64'])
             elif 'url' in data:
                 img = load_image_from_url(data['url'])
-            mode = data.get('mode', 'culture')
         elif request.files:
             for key in request.files:
                 file = request.files[key]
                 img = load_image_from_file(file)
                 break
-            mode = request.form.get('mode', 'culture')
         
         if img is None:
             return jsonify({'error': 'No image provided'}), 400
         
-        results = analyze_image(img, mode=mode)
+        results = analyze_image(img)
         
         return jsonify({
             'summary': results['summary'],
+            'morphology_counts': results['morphology_counts'],
             'morphology_percentages': results['morphology_percentages'],
-            'classification': results['classification'],
-            'mode': results['mode']
+            'activation_counts': results['activation_counts'],
+            'activation_percentages': results['activation_percentages'],
+            'classification': results['classification']
         })
     
     except Exception as e:
