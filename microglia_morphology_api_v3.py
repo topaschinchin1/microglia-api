@@ -342,7 +342,9 @@ def analyze_image(img, threshold_method='local', min_cell_size=50, max_cell_size
 
 def determine_overall_classification(morph_counts, act_counts, total_cells, avg_solidity):
     """
-    Determine overall classification based on 4-category system
+    Determine overall classification based on 4-category system.
+    PRIMARY: Use cell-by-cell activation counts (more accurate)
+    SECONDARY: Use avg_solidity for borderline/edge cases
     """
     if total_cells == 0:
         return {
@@ -358,34 +360,36 @@ def determine_overall_classification(morph_counts, act_counts, total_cells, avg_
     dominant_count = morph_counts[dominant_morph]
     dominant_pct = 100 * dominant_count / total_cells
     
-    # Check for borderline solidity
-    is_borderline = bool(BORDERLINE_LOW <= avg_solidity <= BORDERLINE_HIGH)
-    
-    # Determine activation state based on avg_solidity (primary) and cell counts (secondary)
+    # Calculate activation percentages from cell-by-cell classification
     resting_pct = 100 * act_counts['RESTING'] / total_cells
     activated_pct = 100 * act_counts['ACTIVATED'] / total_cells
     
-    # Primary decision: avg_solidity threshold (validated on n=14 samples)
-    if avg_solidity > BORDERLINE_HIGH:
-        activation_state = 'RESTING'
-        confidence = 'HIGH'
-        reasoning = f'High solidity ({avg_solidity:.3f}) well above {SOLIDITY_THRESHOLD} threshold. Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
-    elif avg_solidity >= SOLIDITY_THRESHOLD:
-        activation_state = 'RESTING'
-        confidence = 'MEDIUM' if is_borderline else 'HIGH'
-        reasoning = f'Solidity ({avg_solidity:.3f}) above {SOLIDITY_THRESHOLD} threshold. Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
-    elif avg_solidity >= BORDERLINE_LOW:
-        activation_state = 'ACTIVATED'
-        confidence = 'MEDIUM'
-        reasoning = f'Solidity ({avg_solidity:.3f}) below {SOLIDITY_THRESHOLD} threshold (borderline zone). Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
-    else:
-        activation_state = 'ACTIVATED'
-        confidence = 'HIGH'
-        reasoning = f'Low solidity ({avg_solidity:.3f}) well below {SOLIDITY_THRESHOLD} threshold. Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
+    # Check for borderline (when neither state is clearly dominant)
+    is_borderline = bool(40 <= activated_pct <= 60)
     
-    # Add borderline warning if applicable
-    if is_borderline:
-        reasoning += f' ⚠️ BORDERLINE: Solidity in {BORDERLINE_LOW}-{BORDERLINE_HIGH} zone - recommend manual verification.'
+    # PRIMARY DECISION: Use cell-by-cell classification counts
+    # This is more accurate than avg_solidity because each cell is classified individually
+    if activated_pct >= 60:
+        # Clear majority of cells are activated
+        activation_state = 'ACTIVATED'
+        confidence = 'HIGH' if activated_pct >= 75 else 'MEDIUM'
+        reasoning = f'{activated_pct:.1f}% of cells classified as ACTIVATED ({act_counts["ACTIVATED"]}/{total_cells}). Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
+    elif resting_pct >= 60:
+        # Clear majority of cells are resting
+        activation_state = 'RESTING'
+        confidence = 'HIGH' if resting_pct >= 75 else 'MEDIUM'
+        reasoning = f'{resting_pct:.1f}% of cells classified as RESTING ({act_counts["RESTING"]}/{total_cells}). Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
+    else:
+        # Borderline case (40-60% split) - use avg_solidity as tie-breaker
+        is_borderline = True
+        if avg_solidity >= SOLIDITY_THRESHOLD:
+            activation_state = 'RESTING'
+            reasoning = f'Borderline case ({activated_pct:.1f}% activated). Avg solidity ({avg_solidity:.3f}) above threshold favors RESTING.'
+        else:
+            activation_state = 'ACTIVATED'
+            reasoning = f'Borderline case ({activated_pct:.1f}% activated). Avg solidity ({avg_solidity:.3f}) below threshold favors ACTIVATED.'
+        confidence = 'LOW'
+        reasoning += f' Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%). ⚠️ BORDERLINE - recommend manual verification.'
     
     return {
         'activation_state': activation_state,
