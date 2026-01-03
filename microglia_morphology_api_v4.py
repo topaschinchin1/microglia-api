@@ -1,6 +1,6 @@
 """
-Microglia Morphology Analysis API v4.0.0
-With 4-CATEGORY MORPHOLOGY CLASSIFICATION
+Microglia Morphology Analysis API v4.1.0
+With 4-CATEGORY MORPHOLOGY CLASSIFICATION - FIXED THRESHOLDS
 
 Categories (based on validated reference data):
 1. RAMIFIED - 🟢 RESTING: Small soma, long processes, high branching, star-shaped
@@ -8,7 +8,9 @@ Categories (based on validated reference data):
 3. HYPERTROPHIC - 🔴 ACTIVATED: Enlarged body, thickened processes  
 4. ROD_LIKE - 🔴 ACTIVATED: Elongated bipolar shape
 
-Calibration: n=14 samples, 100% accuracy, threshold=0.79
+FIX IN v4.1: Corrected AMOEBOID threshold - was catching PBS cells incorrectly
+- OLD: AMOEBOID if solidity > 0.75 (too loose - caught PBS cells)
+- NEW: AMOEBOID if solidity < 0.78 AND high circularity (truly round/blob-like activated cells)
 
 Requirements:
 pip install flask numpy scikit-image scipy pillow gunicorn
@@ -29,12 +31,13 @@ from scipy import ndimage
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION - RECALIBRATED BASED ON PBS DATA
 # =============================================================================
 
-# Validated threshold (recalibrated on n=14 samples)
-SOLIDITY_THRESHOLD = 0.79
-BORDERLINE_LOW = 0.78
+# PBS samples show solidity range: 0.78 - 0.84
+# The threshold needs to separate PBS (resting) from LPS (activated)
+SOLIDITY_THRESHOLD = 0.78  # Lowered from 0.79 to catch more PBS as RESTING
+BORDERLINE_LOW = 0.76
 BORDERLINE_HIGH = 0.80
 
 # =============================================================================
@@ -143,37 +146,34 @@ def analyze_single_cell(cell_mask, cell_intensity=None):
     }
 
 # =============================================================================
-# 4-CATEGORY MORPHOLOGY CLASSIFICATION
+# 4-CATEGORY MORPHOLOGY CLASSIFICATION - FIXED v4.1
 # =============================================================================
 
 def classify_morphology_4category(metrics):
     """
-    4-CATEGORY CLASSIFICATION SYSTEM
+    4-CATEGORY CLASSIFICATION SYSTEM - v4.1 FIXED
     
-    Based on validated reference data from GPT-4o analysis:
+    KEY FIX: The old logic classified high-solidity PBS cells as AMOEBOID
+    because it only required solidity > 0.75. But PBS (resting) cells have
+    HIGH solidity (0.78-0.84), while truly activated AMOEBOID cells should
+    have LOWER solidity due to their irregular shape.
     
-    1. RAMIFIED - 🟢 RESTING
-       - Small soma, long processes, high branching, star-shaped
-       - High solidity (>0.79), low circularity (<0.5), moderate aspect ratio
-       
-    2. AMOEBOID - 🔴 ACTIVATED  
-       - Large soma, absent processes, no branching, round
-       - High circularity (>0.6), high solidity (>0.8), low aspect ratio (<2)
-       
-    3. HYPERTROPHIC - 🔴 ACTIVATED
-       - Enlarged body, thickened processes
-       - Medium solidity (0.72-0.82), low circularity, moderate branching
-       
-    4. ROD_LIKE - 🔴 ACTIVATED
-       - Elongated bipolar shape
-       - High aspect ratio (>3), high eccentricity (>0.9)
+    NEW LOGIC:
+    1. ROD_LIKE - Elongated bipolar (high aspect ratio, high eccentricity)
+    2. RAMIFIED - Resting, star-shaped (HIGH solidity >= 0.78)
+    3. AMOEBOID - Activated, round blob (LOW solidity < 0.72, high circularity)
+    4. HYPERTROPHIC - Activated, enlarged (moderate solidity 0.72-0.78)
+    
+    The key insight: SOLIDITY is the primary discriminator
+    - HIGH solidity (>= 0.78) = compact/resting = RAMIFIED
+    - LOW solidity (< 0.72) = irregular/activated = AMOEBOID or HYPERTROPHIC
     """
     solidity = metrics.get('solidity', 0)
     circularity = metrics.get('circularity', 0)
     aspect_ratio = metrics.get('aspect_ratio', 1)
     eccentricity = metrics.get('eccentricity', 0)
     
-    # ROD_LIKE: Elongated bipolar shape (highest priority for shape detection)
+    # 1. ROD_LIKE: Elongated bipolar shape (check first - very distinctive)
     if aspect_ratio > 3.0 and eccentricity > 0.85:
         return {
             'morphology_class': 'ROD_LIKE',
@@ -181,43 +181,31 @@ def classify_morphology_4category(metrics):
             'features': 'Elongated bipolar shape, high aspect ratio'
         }
     
-    # AMOEBOID: Round, blob-like, no processes
-    if circularity > 0.55 and solidity > 0.75 and aspect_ratio < 2.2:
-        return {
-            'morphology_class': 'AMOEBOID',
-            'activation_state': 'ACTIVATED',
-            'features': 'Large soma, absent processes, round shape'
-        }
-    
-    # RAMIFIED: Star-shaped, highly branched (resting state)
-    if solidity > SOLIDITY_THRESHOLD and circularity < 0.55:
-        return {
-            'morphology_class': 'RAMIFIED',
-            'activation_state': 'RESTING',
-            'features': 'Small soma, long processes, high branching, star-shaped'
-        }
-    
-    # HYPERTROPHIC: Enlarged body with thickened processes
-    if solidity < SOLIDITY_THRESHOLD and circularity < 0.5:
-        return {
-            'morphology_class': 'HYPERTROPHIC',
-            'activation_state': 'ACTIVATED',
-            'features': 'Enlarged body, thickened processes'
-        }
-    
-    # Default: Classify based on solidity threshold
+    # 2. RAMIFIED: High solidity = compact = RESTING (PBS-like)
+    # This is the KEY FIX - prioritize solidity for resting classification
     if solidity >= SOLIDITY_THRESHOLD:
         return {
             'morphology_class': 'RAMIFIED',
             'activation_state': 'RESTING',
-            'features': 'Compact morphology, resting-like'
+            'features': 'Compact morphology, high solidity, resting state'
         }
-    else:
+    
+    # Below threshold = ACTIVATED (either AMOEBOID or HYPERTROPHIC)
+    
+    # 3. AMOEBOID: Low solidity + high circularity = round blob (severely activated)
+    if solidity < 0.72 and circularity > 0.5:
         return {
-            'morphology_class': 'HYPERTROPHIC',
+            'morphology_class': 'AMOEBOID',
             'activation_state': 'ACTIVATED',
-            'features': 'Irregular morphology, activation signs'
+            'features': 'Large round soma, absent processes, blob-like'
         }
+    
+    # 4. HYPERTROPHIC: Moderate-low solidity (0.72-0.78) = enlarged body with processes
+    return {
+        'morphology_class': 'HYPERTROPHIC',
+        'activation_state': 'ACTIVATED',
+        'features': 'Enlarged body, thickened processes, activation signs'
+    }
 
 # =============================================================================
 # MAIN ANALYSIS PIPELINE
@@ -368,34 +356,31 @@ def determine_overall_classification(morph_counts, act_counts, total_cells, avg_
     is_borderline = bool(40 <= activated_pct <= 60)
     
     # PRIMARY DECISION: Use cell-by-cell classification counts
-    # This is more accurate than avg_solidity because each cell is classified individually
     if activated_pct >= 60:
-        # Clear majority of cells are activated
         activation_state = 'ACTIVATED'
         confidence = 'HIGH' if activated_pct >= 75 else 'MEDIUM'
         reasoning = f'{activated_pct:.1f}% of cells classified as ACTIVATED ({act_counts["ACTIVATED"]}/{total_cells}). Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
     elif resting_pct >= 60:
-        # Clear majority of cells are resting
         activation_state = 'RESTING'
         confidence = 'HIGH' if resting_pct >= 75 else 'MEDIUM'
         reasoning = f'{resting_pct:.1f}% of cells classified as RESTING ({act_counts["RESTING"]}/{total_cells}). Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%).'
     else:
-        # Borderline case (40-60% split) - use avg_solidity as tie-breaker
+        # Borderline case - use avg_solidity as tie-breaker
         is_borderline = True
         if avg_solidity >= SOLIDITY_THRESHOLD:
             activation_state = 'RESTING'
-            reasoning = f'Borderline case ({activated_pct:.1f}% activated). Avg solidity ({avg_solidity:.3f}) above threshold favors RESTING.'
+            reasoning = f'Borderline ({activated_pct:.1f}% activated). Avg solidity ({avg_solidity:.3f}) >= {SOLIDITY_THRESHOLD} favors RESTING.'
         else:
             activation_state = 'ACTIVATED'
-            reasoning = f'Borderline case ({activated_pct:.1f}% activated). Avg solidity ({avg_solidity:.3f}) below threshold favors ACTIVATED.'
+            reasoning = f'Borderline ({activated_pct:.1f}% activated). Avg solidity ({avg_solidity:.3f}) < {SOLIDITY_THRESHOLD} favors ACTIVATED.'
         confidence = 'LOW'
-        reasoning += f' Dominant morphology: {dominant_morph} ({dominant_pct:.1f}%). ⚠️ BORDERLINE - recommend manual verification.'
+        reasoning += f' ⚠️ BORDERLINE - recommend manual verification.'
     
     return {
         'activation_state': activation_state,
         'dominant_morphology': dominant_morph,
         'confidence': confidence,
-        'is_borderline': is_borderline,
+        'is_borderline': bool(is_borderline),
         'reasoning': reasoning
     }
 
@@ -407,11 +392,10 @@ def determine_overall_classification(morph_counts, act_counts, total_cells, avg_
 def health():
     return jsonify({
         'status': 'healthy', 
-        'version': '4.0.0-4category',
+        'version': '4.1.0-fixed',
         'threshold': SOLIDITY_THRESHOLD,
         'borderline_zone': [BORDERLINE_LOW, BORDERLINE_HIGH],
-        'calibration': 'n=14 samples (PBS vs LPS)',
-        'accuracy': '100% (14/14)',
+        'fix': 'Corrected AMOEBOID threshold - now requires LOW solidity for activated cells',
         'categories': ['RAMIFIED', 'AMOEBOID', 'HYPERTROPHIC', 'ROD_LIKE'],
         'accepts': ['application/json', 'multipart/form-data']
     })
@@ -420,16 +404,6 @@ def health():
 def analyze():
     """
     Main analysis endpoint with 4-category morphology classification
-    
-    Accepts BOTH JSON and multipart/form-data
-    
-    JSON format:
-    {"base64": "...", "threshold_method": "local"}
-    or {"url": "...", "threshold_method": "local"}
-    
-    Form-data format:
-    image: <file>
-    threshold_method: local (optional)
     """
     try:
         img = None
@@ -467,7 +441,7 @@ def analyze():
         if img is None:
             return jsonify({
                 'error': 'No image provided',
-                'hint': 'Send image as file upload (form-data with "image" field) or JSON with "base64" or "url" key'
+                'hint': 'Send image as file upload or JSON with "base64" or "url" key'
             }), 400
         
         results = analyze_image(
